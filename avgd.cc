@@ -31,6 +31,9 @@ INTERN_SAFE_PTR(zxdg_shell_v6)
 INTERN_SAFE_PTR(zxdg_surface_v6)
 INTERN_SAFE_PTR(zxdg_toplevel_v6)
 INTERN_SAFE_PTR(wl_egl_window)
+INTERN_SAFE_PTR(wl_keyboard)
+INTERN_SAFE_PTR(wl_pointer)
+INTERN_SAFE_PTR(wl_touch)
 
 template <class T, class D>
 inline auto safe_ptr(T* ptr, D deleter) {
@@ -123,7 +126,7 @@ int main() {
         std::cerr << "zxdg_surface_v6_get_toplevel failed..." << std::endl;
         return -1;
     }
-    std::complex<double> resolution(640, 480);
+    float resolution_vec[2] = { 640, 480 };
     auto egl_display = safe_ptr(eglGetDisplay(display.get()), eglTerminate);
     if (!egl_display) {
         std::cerr << "eglGetDisplay failed..." << std::endl;
@@ -134,8 +137,8 @@ int main() {
         return -1;
     }
     auto egl_window = safe_ptr(wl_egl_window_create(surface.get(),
-                                                    resolution.real(),
-                                                    resolution.imag()));
+                                                    resolution_vec[0],
+                                                    resolution_vec[1]));
     if (!egl_window) {
         std::cerr << "wl_egl_window_create failed..." << std::endl;
         return -1;
@@ -144,7 +147,8 @@ int main() {
         if (width * height) {
             wl_egl_window_resize(egl_window.get(), width, height, 0, 0);
             glViewport(0, 0, width, height);
-            resolution = std::complex<double>(width, height);
+            resolution_vec[0] = width;
+            resolution_vec[1] = height;
         }
     };
     zxdg_toplevel_v6_listener toplevel_listener = {
@@ -157,13 +161,292 @@ int main() {
         std::cerr << "zxdg_toplevel_v6_add_listener failed..." << std::endl;
         return -1;
     }
+    wl_surface_commit(surface.get());
+
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+        std::cerr << "eglBindAPI failed..." << std::endl;
+        return -1;
+    }
+    EGLConfig config;
+    EGLint num_config;
+    if (!eglChooseConfig(egl_display.get(),
+                         std::array<EGLint, 15>(
+                             {
+                                 EGL_LEVEL, 0,
+                                 EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+                                 EGL_RED_SIZE, 8,
+                                 EGL_GREEN_SIZE, 8,
+                                 EGL_BLUE_SIZE, 8,
+                                 EGL_ALPHA_SIZE, 8,
+                                 EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+                                 EGL_NONE,
+                             }
+                         ).data(),
+                         &config, 1, &num_config))
+    {
+        std::cerr << "eglChooseConfig failed..." << std::endl;
+        return -1;
+    }
+    auto egl_context = safe_ptr(eglCreateContext(egl_display.get(),
+                                                 config,
+                                                 EGL_NO_CONTEXT,
+                                                 std::array<EGLint, 3>(
+                                                     {
+                                                         EGL_CONTEXT_CLIENT_VERSION, 2,
+                                                         EGL_NONE,
+                                                     }
+                                                 ).data()),
+                                [&egl_display](auto ptr) noexcept {
+                                    eglDestroyContext(egl_display.get(), ptr);
+                                });
+    if (!egl_context) {
+        std::cerr << "eglCreateContext failed..." << std::endl;
+        return -1;
+    }
+    auto egl_surface = safe_ptr(eglCreateWindowSurface(egl_display.get(),
+                                                       config,
+                                                       egl_window.get(),
+                                                       nullptr),
+                                [&egl_display](auto ptr) noexcept {
+                                    eglDestroySurface(egl_display.get(), ptr);
+                                });
+    if (!egl_surface) {
+        std::cerr << "eglCreateWindowSurface failed..." << std::endl;
+        return -1;
+    }
+    if (!eglMakeCurrent(egl_display.get(), egl_surface.get(), egl_surface.get(), egl_context.get())) {
+        std::cerr << "eglMakeCurrent failed..." << std::endl;
+        return -1;
+    }
+
+    auto pointer = safe_ptr(wl_seat_get_pointer(seat.get()));
+    if (!pointer) {
+        std::cerr << "wl_seat_get_pointer failed..." << std::endl;
+        return -1;
+    }
+    float pointer_vec[2];
+    auto pointer_motion = [&](wl_fixed_t x, wl_fixed_t y) noexcept {
+        pointer_vec[0] = static_cast<float>(wl_fixed_to_int(x));
+        pointer_vec[1] = resolution_vec[1] - static_cast<float>(wl_fixed_to_int(y));
+    };
+    wl_pointer_listener pointer_listener = {
+        .enter = [](auto...) noexcept { },
+        .leave = [](auto...) noexcept { },
+        .motion = [](void* data, auto, auto, auto x, auto y) noexcept {
+            (*sycl::bit_cast<decltype (pointer_motion)*>(data))(x, y);
+        },
+        .button = [](auto...) noexcept { },
+        .axis = [](auto...) noexcept { },
+        .frame = [](auto...) noexcept { },
+        .axis_source = [](auto...) noexcept { },
+        .axis_stop = [](auto...) noexcept { },
+        .axis_discrete = [](auto...) noexcept { },
+    };
+    if (wl_pointer_add_listener(pointer.get(), &pointer_listener, &pointer_motion) != 0) {
+        std::cerr << "wl_pointer_add_listener failed..." << std::endl;
+        return -1;
+    }
+
     if (wl_display_roundtrip(display.get()) == -1) {
         std::cerr << "wl_display_roundtrip failed..." << std::endl;
         return -1;
     }
+
+#if 0
+    auto program = glCreateProgram();
+    auto compile = [program](int shader, char const* code) noexcept {
+        int compiled = 0;
+        if (auto id = glCreateShader(shader)) {
+            glShaderSource(id, 1, &code, nullptr);
+            glCompileShader(id);
+            glGetShaderiv(id, GL_COMPILE_STATUS, &compiled);
+            if (compiled) {
+                glAttachShader(program, id);
+            }
+            //!!!glDeleteShader(id);
+        }
+        return compiled;
+    };
+
+#define CODE(x) (#x)
+    if (!compile(GL_VERTEX_SHADER,
+                 CODE(attribute vec4 position;
+                      varying vec2 vert;
+                      void main(void) {
+                          vert = position.xy;
+                          gl_Position = position;
+                      })))
+    {
+        std::cerr << "vertex shader compilation failed..." << std::endl;
+        return -1;
+    }
+    if (!compile(GL_FRAGMENT_SHADER,
+                 CODE(precision mediump float;
+                      varying vec2 vert;
+                      uniform vec2 resolution;
+                      uniform vec2 pointer;
+                      void main(void) {
+                          float brightness = length(gl_FragCoord.xy - resolution / 2.0);
+                          brightness /= length(resolution);
+                          brightness = 1.0 - brightness;
+                          float radius = length(pointer - gl_FragCoord.xy);
+                          float touchMark = smoothstep(16.0, 40.0, radius);
+                          gl_FragColor *= touchMark;
+                      })))
+    {
+        std::cerr << "fragment shader compilation failed..." << std::endl;
+        return -1;
+    }
+#undef CODE
+
+    glBindAttribLocation(program, 0, "position");
+    glLinkProgram(program);
+    GLint linked;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        std::cerr << "linker failed..." << std::endl;
+        return -1;
+    }
+    glUseProgram(program);
+    glFrontFace(GL_CW);
+//    wl_surface_commit(surface.get());
+
     do {
-        wl_surface_commit(surface.get());
-        wl_display_flush(display.get());
-    } while (wl_display_dispatch(display.get()) != -1);
+        glClearColor(0.0, 0.8, 0.0, 0.8);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glUseProgram(program);
+        glUniform2fv(glGetUniformLocation(program, "resolution"), 1, resolution_vec);
+        glUniform2fv(glGetUniformLocation(program, "pointer"), 1, pointer_vec);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0,
+                              std::array<float, 12>({
+                                      -1, +1, 0,
+                                      +1, +1, 0,
+                                      +1, -1, 0,
+                                      -1, -1, 0,
+                                  }).data());
+        glEnableVertexAttribArray(0);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        eglSwapBuffers(egl_display.get(), egl_surface.get());
+    } while (wl_display_dispatch_pending(display.get()) != -1);
+#endif
+
+    auto vid = glCreateShader(GL_VERTEX_SHADER);
+    std::cerr << "***" << vid << std::endl;
+    auto fid = glCreateShader(GL_FRAGMENT_SHADER);
+    std::cerr << "***" << fid << std::endl;
+
+#define CODE(x) (#x)
+
+    auto v_code =
+      std::string("\n") + 
+      CODE(
+	   attribute vec4 position;
+	   varying vec2 vert;
+
+	   void main(void) {
+	     vert = position.xy;
+	     gl_Position = position;
+	   }
+	   );
+    auto f_code =
+      std::string("\n") + 
+      CODE(
+	   precision mediump float;
+	   varying vec2 vert;
+	   uniform vec2 resolution;
+	   uniform vec2 pointer;
+
+	   void main(void) {
+	     // float brightness = length(gl_FragCoord.xy - resolution * (vert / 0.5 + vec2(0.5))) / length(resolution);
+	     // brightness *= brightness;	     brightness *= brightness;	     brightness *= brightness;
+	     // brightness = 1.0 - brightness;
+	     // gl_FragColor = vec4(0.0, 0.5, brightness, brightness);
+	     float brightness = length(gl_FragCoord.xy - resolution / 2.0) / length(resolution);
+	     brightness = 1.0 - brightness;
+	     gl_FragColor = vec4(0.0, 0.0, brightness, brightness);
+
+	     float radius = length(pointer - gl_FragCoord.xy);
+	     float touchMark = smoothstep(16.0,
+					  40.0,
+					  radius);
+
+	     gl_FragColor *= touchMark;
+	   }
+
+	   );
+
+    auto compile = [](auto id, auto code) {
+      glShaderSource(id, 1, &code, nullptr);
+      glCompileShader(id);
+      GLint result;
+      glGetShaderiv(id, GL_COMPILE_STATUS, &result);
+      std::cerr << result << std::endl;
+      GLint infoLogLength = 0;
+      glGetShaderiv(id, GL_INFO_LOG_LENGTH, &infoLogLength);
+      std::cerr << infoLogLength << std::endl;
+       std::vector<char> buf(infoLogLength);
+      glGetShaderInfoLog(id, infoLogLength, nullptr, &buf.front());
+      std::cerr << "<<<" << std::endl;
+      std::cerr << code << std::endl;
+      std::cerr << "---" << std::endl;
+      std::cerr << std::string(buf.begin(), buf.end()).c_str() << std::endl;
+      std::cerr << ">>>" << std::endl;
+    };
+
+    compile(vid, v_code.c_str());
+    compile(fid, f_code.c_str());
+
+    auto program = glCreateProgram();
+    glAttachShader(program, vid);
+    glAttachShader(program, fid);
+
+    glDeleteShader(vid);
+    glDeleteShader(fid);
+
+    glBindAttribLocation(program, 0, "position");
+
+    glLinkProgram(program);
+    GLint linked;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    std::cerr << linked << "(" << GL_TRUE << "/" << GL_FALSE << ")" << std::endl;
+    GLint length;
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+    std::vector<char> buf(length);
+    glGetProgramInfoLog(program, length, nullptr, &buf.front());
+    std::cerr << "<<<" << std::endl;
+    std::cerr << std::string(buf.begin(), buf.end()).c_str() << std::endl;
+    std::cerr << ">>>" << std::endl;
+    glUseProgram(program);
+
+    //    auto resolution = glGetUniformLocation(program, "resolution");
+    //glUniform2fv(resolution, 1, resolution_vec);
+
+    glFrontFace(GL_CW);
+
+    for (;;) {
+      auto ret = wl_display_dispatch_pending(display.get());
+      //      if (ret == -1)
+      //break;
+      //      if (wl_display_dispatch_pending(display.get())) {
+      //}
+      glClearColor(0.0, 0.8, 0.0, 0.8);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      glUseProgram(program);
+      GLfloat vVertices[] = {
+	-1, +1, 0,
+	+1, +1, 0,
+	+1, -1, 0,
+	-1, -1, 0,
+      };
+      //      glUniform2f(resolution, resolution_vec[0], resolution_vec[1]);
+      glUniform2fv(glGetUniformLocation(program, "resolution"), 1, resolution_vec);
+      glUniform2fv(glGetUniformLocation(program, "pointer"), 1, pointer_vec);
+      glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, vVertices);
+      glEnableVertexAttribArray(0);
+      glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+
+      eglSwapBuffers(egl_display.get(), egl_surface.get());
+    }
+
     return 0;
 }
