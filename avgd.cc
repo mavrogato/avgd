@@ -57,27 +57,27 @@ int main() {
     auto registry_global = [&](auto name, std::string_view interface, auto version) noexcept {
         if (interface == wl_compositor_interface.name) {
             compositor.reset(
-                sycl::bit_cast<wl_compositor*>(wl_registry_bind(registry.get(),
-                                                                name,
-                                                                &wl_compositor_interface,
-                                                                version)));
+                reinterpret_cast<wl_compositor*>(wl_registry_bind(registry.get(),
+                                                                  name,
+                                                                  &wl_compositor_interface,
+                                                                  version)));
         }
         else if (interface == zxdg_shell_v6_interface.name) {
-            shell.reset(sycl::bit_cast<zxdg_shell_v6*>(wl_registry_bind(registry.get(),
-                                                                        name,
-                                                                        &zxdg_shell_v6_interface,
-                                                                        version)));
+            shell.reset(reinterpret_cast<zxdg_shell_v6*>(wl_registry_bind(registry.get(),
+                                                                          name,
+                                                                          &zxdg_shell_v6_interface,
+                                                                          version)));
         }
         else if (interface == wl_seat_interface.name) {
-            seat.reset(sycl::bit_cast<wl_seat*>(wl_registry_bind(registry.get(),
-                                                                 name,
-                                                                 &wl_seat_interface,
-                                                                 version)));
+            seat.reset(reinterpret_cast<wl_seat*>(wl_registry_bind(registry.get(),
+                                                                   name,
+                                                                   &wl_seat_interface,
+                                                                   version)));
         }
     };
     wl_registry_listener registry_listener {
         .global = [](auto data, auto, auto... args) noexcept {
-            (*sycl::bit_cast<decltype (registry_global)*>(data))(args...);
+            (*reinterpret_cast<decltype (registry_global)*>(data))(args...);
         },
         .global_remove = [](auto...) noexcept { },
     };
@@ -143,7 +143,7 @@ int main() {
         std::cerr << "wl_egl_window_create failed..." << std::endl;
         return -1;
     }
-    auto toplevel_configure = [&](int width, int height) noexcept {
+    auto configure = [&](int width, int height) noexcept {
         if (width * height) {
             wl_egl_window_resize(egl_window.get(), width, height, 0, 0);
             glViewport(0, 0, width, height);
@@ -153,11 +153,11 @@ int main() {
     };
     zxdg_toplevel_v6_listener toplevel_listener = {
         .configure = [](auto data, auto, int width, int height, auto) noexcept {
-            (*sycl::bit_cast<decltype (toplevel_configure)*>(data))(width, height);
+            (*reinterpret_cast<decltype (configure)*>(data))(width, height);
         },
         .close = [](auto...) noexcept { },
     };
-    if (zxdg_toplevel_v6_add_listener(toplevel.get(), &toplevel_listener, &toplevel_configure) != 0) {
+    if (zxdg_toplevel_v6_add_listener(toplevel.get(), &toplevel_listener, &configure) != 0) {
         std::cerr << "zxdg_toplevel_v6_add_listener failed..." << std::endl;
         return -1;
     }
@@ -214,11 +214,38 @@ int main() {
         std::cerr << "eglCreateWindowSurface failed..." << std::endl;
         return -1;
     }
-    if (!eglMakeCurrent(egl_display.get(), egl_surface.get(), egl_surface.get(), egl_context.get())) {
+    if (!eglMakeCurrent(egl_display.get(),
+                        egl_surface.get(), egl_surface.get(),
+                        egl_context.get()))
+    {
         std::cerr << "eglMakeCurrent failed..." << std::endl;
         return -1;
     }
-
+    auto keyboard = safe_ptr(wl_seat_get_keyboard(seat.get()));
+    if (!keyboard) {
+        std::cerr << "wl_seat_get_keyboard failed..." << std::endl;
+        return -1;
+    }
+    int key = 0;
+    int state = 0;
+    auto keyboard_key = [&](uint32_t k, uint32_t s) noexcept {
+        key = k;
+        state = s;
+    };
+    wl_keyboard_listener keyboard_listener = {
+        .keymap = [](auto...) noexcept { },
+        .enter = [](auto...) noexcept { },
+        .leave = [](auto...) noexcept { },
+        .key = [](auto data, auto, auto, auto, uint32_t key, uint32_t state) {
+            (*reinterpret_cast<decltype (keyboard_key)*>(data))(key, state);
+        },
+        .modifiers = [](auto...) noexcept { },
+        .repeat_info = [](auto...) noexcept { },
+    };
+    if (wl_keyboard_add_listener(keyboard.get(), &keyboard_listener, &keyboard_key) != 0) {
+        std::cerr << "wl_keyboard_add_listener failed..." << std::endl;
+        return -1;
+    }
     auto pointer = safe_ptr(wl_seat_get_pointer(seat.get()));
     if (!pointer) {
         std::cerr << "wl_seat_get_pointer failed..." << std::endl;
@@ -233,7 +260,7 @@ int main() {
         .enter = [](auto...) noexcept { },
         .leave = [](auto...) noexcept { },
         .motion = [](void* data, auto, auto, auto x, auto y) noexcept {
-            (*sycl::bit_cast<decltype (pointer_motion)*>(data))(x, y);
+            (*reinterpret_cast<decltype (pointer_motion)*>(data))(x, y);
         },
         .button = [](auto...) noexcept { },
         .axis = [](auto...) noexcept { },
@@ -251,8 +278,6 @@ int main() {
         std::cerr << "wl_display_roundtrip failed..." << std::endl;
         return -1;
     }
-
-#if 0
     auto program = glCreateProgram();
     auto compile = [program](int shader, char const* code) noexcept {
         int compiled = 0;
@@ -263,11 +288,10 @@ int main() {
             if (compiled) {
                 glAttachShader(program, id);
             }
-            //!!!glDeleteShader(id);
+            glDeleteShader(id);
         }
         return compiled;
     };
-
 #define CODE(x) (#x)
     if (!compile(GL_VERTEX_SHADER,
                  CODE(attribute vec4 position;
@@ -289,6 +313,7 @@ int main() {
                           float brightness = length(gl_FragCoord.xy - resolution / 2.0);
                           brightness /= length(resolution);
                           brightness = 1.0 - brightness;
+                          gl_FragColor = vec4(0.0, 0.0, brightness, brightness);
                           float radius = length(pointer - gl_FragCoord.xy);
                           float touchMark = smoothstep(16.0, 40.0, radius);
                           gl_FragColor *= touchMark;
@@ -298,7 +323,6 @@ int main() {
         return -1;
     }
 #undef CODE
-
     glBindAttribLocation(program, 0, "position");
     glLinkProgram(program);
     GLint linked;
@@ -309,9 +333,10 @@ int main() {
     }
     glUseProgram(program);
     glFrontFace(GL_CW);
-//    wl_surface_commit(surface.get());
-
     do {
+        if (key == 1 && state == 0) {
+            return 0;
+        }
         glClearColor(0.0, 0.8, 0.0, 0.8);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(program);
@@ -327,126 +352,6 @@ int main() {
         glEnableVertexAttribArray(0);
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         eglSwapBuffers(egl_display.get(), egl_surface.get());
-    } while (wl_display_dispatch_pending(display.get()) != -1);
-#endif
-
-    auto vid = glCreateShader(GL_VERTEX_SHADER);
-    std::cerr << "***" << vid << std::endl;
-    auto fid = glCreateShader(GL_FRAGMENT_SHADER);
-    std::cerr << "***" << fid << std::endl;
-
-#define CODE(x) (#x)
-
-    auto v_code =
-      std::string("\n") + 
-      CODE(
-	   attribute vec4 position;
-	   varying vec2 vert;
-
-	   void main(void) {
-	     vert = position.xy;
-	     gl_Position = position;
-	   }
-	   );
-    auto f_code =
-      std::string("\n") + 
-      CODE(
-	   precision mediump float;
-	   varying vec2 vert;
-	   uniform vec2 resolution;
-	   uniform vec2 pointer;
-
-	   void main(void) {
-	     // float brightness = length(gl_FragCoord.xy - resolution * (vert / 0.5 + vec2(0.5))) / length(resolution);
-	     // brightness *= brightness;	     brightness *= brightness;	     brightness *= brightness;
-	     // brightness = 1.0 - brightness;
-	     // gl_FragColor = vec4(0.0, 0.5, brightness, brightness);
-	     float brightness = length(gl_FragCoord.xy - resolution / 2.0) / length(resolution);
-	     brightness = 1.0 - brightness;
-	     gl_FragColor = vec4(0.0, 0.0, brightness, brightness);
-
-	     float radius = length(pointer - gl_FragCoord.xy);
-	     float touchMark = smoothstep(16.0,
-					  40.0,
-					  radius);
-
-	     gl_FragColor *= touchMark;
-	   }
-
-	   );
-
-    auto compile = [](auto id, auto code) {
-      glShaderSource(id, 1, &code, nullptr);
-      glCompileShader(id);
-      GLint result;
-      glGetShaderiv(id, GL_COMPILE_STATUS, &result);
-      std::cerr << result << std::endl;
-      GLint infoLogLength = 0;
-      glGetShaderiv(id, GL_INFO_LOG_LENGTH, &infoLogLength);
-      std::cerr << infoLogLength << std::endl;
-       std::vector<char> buf(infoLogLength);
-      glGetShaderInfoLog(id, infoLogLength, nullptr, &buf.front());
-      std::cerr << "<<<" << std::endl;
-      std::cerr << code << std::endl;
-      std::cerr << "---" << std::endl;
-      std::cerr << std::string(buf.begin(), buf.end()).c_str() << std::endl;
-      std::cerr << ">>>" << std::endl;
-    };
-
-    compile(vid, v_code.c_str());
-    compile(fid, f_code.c_str());
-
-    auto program = glCreateProgram();
-    glAttachShader(program, vid);
-    glAttachShader(program, fid);
-
-    glDeleteShader(vid);
-    glDeleteShader(fid);
-
-    glBindAttribLocation(program, 0, "position");
-
-    glLinkProgram(program);
-    GLint linked;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    std::cerr << linked << "(" << GL_TRUE << "/" << GL_FALSE << ")" << std::endl;
-    GLint length;
-    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
-    std::vector<char> buf(length);
-    glGetProgramInfoLog(program, length, nullptr, &buf.front());
-    std::cerr << "<<<" << std::endl;
-    std::cerr << std::string(buf.begin(), buf.end()).c_str() << std::endl;
-    std::cerr << ">>>" << std::endl;
-    glUseProgram(program);
-
-    //    auto resolution = glGetUniformLocation(program, "resolution");
-    //glUniform2fv(resolution, 1, resolution_vec);
-
-    glFrontFace(GL_CW);
-
-    for (;;) {
-      auto ret = wl_display_dispatch_pending(display.get());
-      //      if (ret == -1)
-      //break;
-      //      if (wl_display_dispatch_pending(display.get())) {
-      //}
-      glClearColor(0.0, 0.8, 0.0, 0.8);
-      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-      glUseProgram(program);
-      GLfloat vVertices[] = {
-	-1, +1, 0,
-	+1, +1, 0,
-	+1, -1, 0,
-	-1, -1, 0,
-      };
-      //      glUniform2f(resolution, resolution_vec[0], resolution_vec[1]);
-      glUniform2fv(glGetUniformLocation(program, "resolution"), 1, resolution_vec);
-      glUniform2fv(glGetUniformLocation(program, "pointer"), 1, pointer_vec);
-      glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, vVertices);
-      glEnableVertexAttribArray(0);
-      glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-
-      eglSwapBuffers(egl_display.get(), egl_surface.get());
-    }
-
+    } while (wl_display_dispatch(display.get()) != -1);
     return 0;
 }
