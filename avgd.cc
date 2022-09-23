@@ -201,6 +201,19 @@ int main() {
             .axis_discrete = [](auto...) noexcept { },
         };
         TRY(0 == wl_pointer_add_listener(pointer.get(), &pointer_listener, &pointer_motion));
+        auto touch = safe_ptr(TRY(wl_seat_get_touch(seat.get())));
+        wl_touch_listener touch_listener = {
+            .down = [](auto...) noexcept { },
+            .up = [](auto...) noexcept { },
+            .motion = [](void* data, auto, auto, auto, auto x, auto y) noexcept {
+                (*reinterpret_cast<decltype (pointer_motion)*>(data))(x, y);
+            },
+            .frame = [](auto...) noexcept { },
+            .cancel = [](auto...) noexcept { },
+            .shape = [](auto...) noexcept { },
+            .orientation = [](auto...) noexcept { },
+        };
+        TRY(0 == wl_touch_add_listener(touch.get(), &touch_listener, &pointer_motion));
         auto program = TRY(glCreateProgram());
         auto compile = [](auto program, auto shader_type, char const* code) noexcept {
             GLint compiled = 0;
